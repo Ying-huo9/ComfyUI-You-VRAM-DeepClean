@@ -23,6 +23,38 @@ import gc
 
 
 # ---------------------------------------------------------------------------
+# HTTP 接口(供前端「立即释放」按钮直接调用,不走运行队列)
+# ---------------------------------------------------------------------------
+
+async def _http_release_endpoint(request):
+    """POST /vramdeepclean/release  —— 三层释放并返回 JSON 报告。"""
+    from aiohttp import web
+    deep = True
+    try:
+        data = await request.json()
+        deep = bool(data.get("deep", True)) if isinstance(data, dict) else True
+    except Exception:
+        pass
+    report, freed = do_release(deep)
+    print("[VRAM深度释放][按钮] " + report)
+    return web.json_response({"ok": True, "report": report, "freed": freed})
+
+
+def _register_route():
+    try:
+        from server import PromptServer
+        if PromptServer.instance is None:
+            return
+        PromptServer.instance.routes.post("/vramdeepclean/release")(_http_release_endpoint)
+        print("[VRAM深度释放] 已注册 /vramdeepclean/release 接口(节点按钮可用)")
+    except Exception as e:
+        print("[VRAM深度释放] HTTP 接口注册失败(按钮将不可用): %s" % e)
+
+
+_register_route()
+
+
+# ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
 
@@ -116,6 +148,43 @@ def _final_sweep():
 
 
 # ---------------------------------------------------------------------------
+# 统一释放入口(节点 run 与 HTTP 按钮接口共用)
+# ---------------------------------------------------------------------------
+
+def do_release(deep=True):
+    """执行三层释放,返回 (报告文本, 释放字节数)。"""
+    before = _vram_snapshot()
+    msgs = []
+
+    # ① ComfyUI 注册模型
+    msgs += _release_comfyui_models()
+
+    # ② 进程内 GGUF 深度扫描
+    if deep:
+        rel = _release_llama_instances()
+        if rel:
+            for name, n in rel:
+                short = str(name).replace("\\", "/").rsplit("/", 1)[-1]
+                msgs.append("GGUF 已释放: %s (断开引用 %d 处)" % (short, n))
+        else:
+            msgs.append("深度扫描: 未发现进程内 GGUF 模型")
+
+    # ③ 终态清扫
+    _final_sweep()
+
+    # 报告
+    after = _vram_snapshot()
+    freed = 0
+    if before and after:
+        freed = max(after["free"] - before["free"], 0)
+        msgs.append("显存空闲 %s → %s (本次释放 %s)"
+                    % (_fmt_gb(before["free"]),
+                       _fmt_gb(after["free"]),
+                       _fmt_gb(freed)))
+    return " | ".join(msgs), freed
+
+
+# ---------------------------------------------------------------------------
 # 节点
 # ---------------------------------------------------------------------------
 
@@ -145,35 +214,8 @@ class VRAMDeepRelease:
     CATEGORY = "VRAM清理"
 
     def run(self, 深度扫描=True, **kwargs):
-        before = _vram_snapshot()
-        msgs = []
-
-        # ① ComfyUI 注册模型
-        msgs += _release_comfyui_models()
-
-        # ② 进程内 GGUF 深度扫描
-        if 深度扫描:
-            rel = _release_llama_instances()
-            if rel:
-                for name, n in rel:
-                    short = str(name).replace("\\", "/").rsplit("/", 1)[-1]
-                    msgs.append("GGUF 已释放: %s (断开引用 %d 处)" % (short, n))
-            else:
-                msgs.append("深度扫描: 未发现进程内 GGUF 模型")
-
-        # ③ 终态清扫
-        _final_sweep()
-
-        # 报告
-        after = _vram_snapshot()
-        if before and after:
-            freed = max(after["free"] - before["free"], 0)
-            msgs.append("显存空闲 %s → %s (本次释放 %s)"
-                        % (_fmt_gb(before["free"]),
-                           _fmt_gb(after["free"]),
-                           _fmt_gb(freed)))
-        print("[VRAM深度释放] " + " | ".join(msgs))
-
+        report, _freed = do_release(bool(深度扫描))
+        print("[VRAM深度释放] " + report)
         # 透传数据 1:1 原样送出(未接的槽位输出 None)
         return tuple(kwargs.get("任意数据%d" % i) for i in range(1, _MAX_SLOTS + 1))
 

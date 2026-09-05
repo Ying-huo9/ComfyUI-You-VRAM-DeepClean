@@ -1,12 +1,40 @@
-// ComfyUI-VRAM-DeepClean —— 透传槽位动态显隐
+// ComfyUI-VRAM-DeepClean —— 透传槽位动态显隐 + 节点「立即释放」按钮
 // 后端固定声明 8 路「任意数据/透传数据」(*),此脚本只做视觉层的显隐:
 //   - 默认只显示第 1 路(空闲)
 //   - 每接入一路,自动亮出下一个空闲槽位(视觉上"连一个长一个")
 //   - 拔掉中间某一路:已连接的槽位永远可见,不隐藏
-// JS 不加载/不生效时:全部 8 路直接显示,功能完全不受影响(优雅降级)。
+// 另加一个「立即释放显存」按钮:点击直调后端 /vramdeepclean/release,
+// 不经过 Queue 运行队列,几秒内原地完成三层释放。
+// JS 不加载/不生效时:全部 8 路直接显示、无按钮,功能完全不受影响(优雅降级)。
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
 const MAX = 8;
+
+async function triggerRelease(node, btn) {
+  const orig = btn.name;
+  const setLabel = (t) => { btn.name = t; node.setDirtyCanvas?.(true, true); };
+  try {
+    setLabel("⏳ 释放中…");
+    const resp = await api.fetchApi("/vramdeepclean/release", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deep: true }),
+    });
+    const data = await resp.json();
+    if (data && data.ok) {
+      console.log("[VRAM深度释放] " + data.report);
+      const m = /本次释放 ([\d.]+GB)/.exec(data.report || "");
+      setLabel(m ? "✅ 已释放 " + m[1] : "✅ 已释放");
+    } else {
+      setLabel("❌ 失败,见控制台");
+    }
+  } catch (e) {
+    console.error("[VRAM深度释放] 请求失败:", e);
+    setLabel("❌ 失败,见控制台");
+  }
+  setTimeout(() => setLabel(orig), 4000);
+}
 
 app.registerExtension({
   name: "VRAMDeepClean.DynamicSlots",
@@ -17,6 +45,12 @@ app.registerExtension({
     nodeType.prototype.onNodeCreated = function () {
       const r = onNodeCreated ? onNodeCreated.apply(this, arguments) : undefined;
       const node = this;
+
+      // 「立即释放」按钮:不走队列,点击即调后端接口
+      const btn = node.addWidget("button", "🔴 立即释放显存", null, () => {
+        triggerRelease(node, btn);
+      });
+      btn.serialize = false;
 
       node.vdcUpdate = function () {
         try {
