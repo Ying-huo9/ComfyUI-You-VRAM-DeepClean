@@ -10,9 +10,11 @@
      (这是 ComfyUI-Manager 够不着的部分,也是本节点存在的意义)
   ③ 终态清扫: gc.collect() + torch.cuda.empty_cache()
 
-节点为 OUTPUT_NODE: 拖进工作流不连任何线,Queue 时也会执行;
+节点为普通执行节点(非 OUTPUT_NODE): 只有透传口接入链路时才随队列执行,
+单独拖进工作流不连线 = 永不自动运行(想手动清理用节点上的「立即释放」按钮,
+或本接口 POST /vramdeepclean/release);
 带 8 路「任意数据」透传口(*) —— 任意类型、任意数量,1:1 原样透传,
-从上一环拉线进来可强制它排在最后执行,兼作执行顺序控制器
+从上一环拉线进来即插入执行位置,兼作执行顺序控制器
 (思路同 Control Order & Free Memory;前端 JS 自动隐藏未用槽位,
 连一个长一个,JS 不生效时最多显示 8 路,功能不受影响)。
 
@@ -210,7 +212,8 @@ class VRAMDeepRelease:
     RETURN_TYPES = ("*",) * _MAX_SLOTS
     RETURN_NAMES = tuple("透传数据%d" % i for i in range(1, _MAX_SLOTS + 1))
     FUNCTION = "run"
-    OUTPUT_NODE = True
+    # 注意: 故意不设 OUTPUT_NODE —— 不接线就不执行,避免抢跑卸载其它节点
+    # 正在使用的模型导致崩溃;手动清理走「立即释放」按钮(HTTP 接口)。
     CATEGORY = "VRAM清理"
 
     def run(self, 深度扫描=True, **kwargs):
