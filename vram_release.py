@@ -10,9 +10,10 @@
      (这是 ComfyUI-Manager 够不着的部分,也是本节点存在的意义)
   ③ 终态清扫: gc.collect() + torch.cuda.empty_cache()
 
-节点为普通执行节点(非 OUTPUT_NODE): 只有透传口接入链路时才随队列执行,
-单独拖进工作流不连线 = 永不自动运行(想手动清理用节点上的「立即释放」按钮,
-或本接口 POST /vramdeepclean/release);
+节点带 OUTPUT_NODE 标记,但有输入守卫:
+  - 串在链路中间或挂在工作流最后(输入有连线)→ 正常执行,清显存;
+  - 空挂在工作流里(一根输入线都没接)→ run() 检测到后自动跳过,
+    不会抢跑卸载其它节点正在使用的模型(这是老版本崩溃的根源)。
 带 8 路「任意数据」透传口(*) —— 任意类型、任意数量,1:1 原样透传,
 从上一环拉线进来即插入执行位置,兼作执行顺序控制器
 (思路同 Control Order & Free Memory;前端 JS 自动隐藏未用槽位,
@@ -212,11 +213,17 @@ class VRAMDeepRelease:
     RETURN_TYPES = ("*",) * _MAX_SLOTS
     RETURN_NAMES = tuple("透传数据%d" % i for i in range(1, _MAX_SLOTS + 1))
     FUNCTION = "run"
-    # 注意: 故意不设 OUTPUT_NODE —— 不接线就不执行,避免抢跑卸载其它节点
-    # 正在使用的模型导致崩溃;手动清理走「立即释放」按钮(HTTP 接口)。
+    # OUTPUT_NODE + 输入守卫: 输入有连线才会真正释放(串中间/挂最后都行);
+    # 空挂不连线则 run() 跳过 —— 兼得"接到最后"与"不抢跑"。
+    OUTPUT_NODE = True
     CATEGORY = "VRAM清理"
 
     def run(self, 深度扫描=True, **kwargs):
+        # 输入守卫: 8 路透传全部未接 → 视为空挂,跳过释放(防抢跑崩溃)
+        if all(kwargs.get("任意数据%d" % i) is None for i in range(1, _MAX_SLOTS + 1)):
+            print("[VRAM深度释放] 未接任何输入,跳过执行(空挂保护);"
+                  "手动清理请点节点上的「立即释放显存」按钮")
+            return tuple(None for _ in range(_MAX_SLOTS))
         report, _freed = do_release(bool(深度扫描))
         print("[VRAM深度释放] " + report)
         # 透传数据 1:1 原样送出(未接的槽位输出 None)
